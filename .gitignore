@@ -6,3 +6,4 @@ obj/
 *.swo
 .DS_Store
 Thumbs.db
+multipurpose.patch
