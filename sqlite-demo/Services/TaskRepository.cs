@@ -1,0 +1,210 @@
+using System.Globalization;
+using Microsoft.Data.Sqlite;
+using SqliteConsole.Data;
+
+namespace SqliteConsole.Services;
+
+public sealed record TaskRow(
+    long Id, string Title, string Details, string Status, int Priority,
+    string? DueDate, string CreatedUtc, string? CompletedUtc);
+
+/// <summary>
+/// All data access for tasks. NOTE: every value goes through a parameter —
+/// never string concatenation (that is how you get SQL injection).
+/// </summary>
+public sealed class TaskRepository(Db db)
+{
+    private const string Select = """
+        SELECT id, title, details, status, priority, due_date, created_utc, completed_utc
+        FROM tasks
+        """;
+
+    public long Add(string title, string details = "", int priority = 2, DateOnly? due = null)
+    {
+        if (string.IsNullOrWhiteSpace(title))
+            throw new ArgumentException("Title must not be empty.", nameof(title));
+
+        using var conn = db.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            INSERT INTO tasks (title, details, priority, due_date)
+            VALUES ($title, $details, $priority, $due);
+            SELECT last_insert_rowid();
+            """;
+        cmd.Parameters.AddWithValue("$title", title.Trim());
+        cmd.Parameters.AddWithValue("$details", details);
+        cmd.Parameters.AddWithValue("$priority", priority);
+        cmd.Parameters.AddWithValue("$due", (object?)due?.ToString("yyyy-MM-dd") ?? DBNull.Value);
+
+        return Convert.ToInt64(cmd.ExecuteScalar());
+    }
+
+    public IReadOnlyList<TaskRow> Query(string? status = null, string? search = null, string order = "id")
+    {
+        var orderSql = order switch
+        {
+            "due" => "due_date IS NULL, due_date",
+            "priority" => "priority, due_date IS NULL, due_date",
+            _ => "id",
+        };
+
+        using var conn = db.Open();
+        using var cmd = conn.CreateCommand();
+
+        var where = new List<string>();
+        if (status is not null) { where.Add("status = $status"); cmd.Parameters.AddWithValue("$status", status); }
+        if (!string.IsNullOrWhiteSpace(search))
+        {
+            // LIKE with ESCAPE so % and _ in user input are literal
+            where.Add("(title LIKE $q ESCAPE '\\' OR details LIKE $q ESCAPE '\\')");
+            cmd.Parameters.AddWithValue("$q", "%" + EscapeLike(search) + "%");
+        }
+
+        cmd.CommandText = Select
+            + (where.Count > 0 ? " WHERE " + string.Join(" AND ", where) : "")
+            + $" ORDER BY {orderSql};";     // whitelisted above, safe from injection
+
+        var rows = new List<TaskRow>();
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            rows.Add(new TaskRow(
+                reader.GetInt64(0),
+                reader.GetString(1),
+                reader.GetString(2),
+                reader.GetString(3),
+                reader.GetInt32(4),
+                reader.IsDBNull(5) ? null : reader.GetString(5),
+                reader.GetString(6),
+                reader.IsDBNull(7) ? null : reader.GetString(7)));
+        }
+        return rows;
+    }
+
+    public bool SetStatus(long id, string status)
+    {
+        using var conn = db.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            UPDATE tasks
+               SET status        = $status,
+                   completed_utc = CASE WHEN $status = 'done'
+                                        THEN strftime('%Y-%m-%dT%H:%M:%SZ','now')
+                                        ELSE NULL END
+             WHERE id = $id;
+            """;
+        cmd.Parameters.AddWithValue("$status", status);
+        cmd.Parameters.AddWithValue("$id", id);
+        return cmd.ExecuteNonQuery() > 0;
+    }
+
+    public bool Delete(long id)
+    {
+        using var conn = db.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "DELETE FROM tasks WHERE id = $id;";
+        cmd.Parameters.AddWithValue("$id", id);
+        return cmd.ExecuteNonQuery() > 0;
+    }
+
+    /// <summary>Bulk insert inside one transaction — orders of magnitude faster than N commits.</summary>
+    public int Seed(int count)
+    {
+        using var conn = db.Open();
+        using var tx = conn.BeginTransaction();
+
+        using var cmd = conn.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = "INSERT INTO tasks (title, details, priority, due_date) VALUES ($t, $d, $p, $u);";
+        var pT = cmd.Parameters.Add("$t", SqliteType.Text);
+        var pD = cmd.Parameters.Add("$d", SqliteType.Text);
+        var pP = cmd.Parameters.Add("$p", SqliteType.Integer);
+        var pU = cmd.Parameters.Add("$u", SqliteType.Text);
+
+        var rnd = new Random(42);
+        for (var i = 1; i <= count; i++)
+        {
+            pT.Value = $"Sample task #{i}";
+            pD.Value = $"Generated by the seed command (row {i}).";
+            pP.Value = rnd.Next(1, 4);
+            pU.Value = DateTime.Now.AddDays(rnd.Next(-5, 30)).ToString("yyyy-MM-dd");
+            cmd.ExecuteNonQuery();
+        }
+        tx.Commit();
+        return count;
+    }
+
+    public (long Total, long Open, long Doing, long Done, long Overdue) Stats()
+    {
+        using var conn = db.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT COUNT(*),
+                   SUM(status = 'open'),
+                   SUM(status = 'doing'),
+                   SUM(status = 'done'),
+                   SUM(status <> 'done' AND due_date IS NOT NULL
+                       AND due_date < strftime('%Y-%m-%d','now'))
+            FROM tasks;
+            """;
+        using var reader = cmd.ExecuteReader();
+        reader.Read();
+        return (
+            reader.GetInt64(0),
+            reader.GetInt64(1),
+            reader.GetInt64(2),
+            reader.GetInt64(3),
+            reader.IsDBNull(4) ? 0 : reader.GetInt64(4));
+    }
+
+    /// <summary>Dumps the whole database (schema + data) as SQL using SQLite's backup API.</summary>
+    public void Backup(string targetPath)
+    {
+        targetPath = Path.GetFullPath(targetPath);
+        Directory.CreateDirectory(Path.GetDirectoryName(targetPath)!);
+
+        using var source = db.Open();
+        using var dest = new SqliteConnection($"Data Source={targetPath}");
+        dest.Open();
+        source.BackupDatabase(dest);
+    }
+
+    /// <summary>Runs an arbitrary read-only-ish statement typed by the user and pretty-prints it.</summary>
+    public void RunRawSql(string sql)
+    {
+        using var conn = db.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = sql;
+
+        SqliteDataReader reader;
+        try { reader = cmd.ExecuteReader(); }
+        catch (SqliteException ex)
+        {
+            Console.Error.WriteLine($"✖ SQLite error {ex.SqliteErrorCode}: {ex.Message}");
+            SqliteConsole.CliExit.Want = 1;
+            return;
+        }
+        using (reader)
+        {
+        var cols = new List<string>();
+        for (var i = 0; i < reader.FieldCount; i++) cols.Add(reader.GetName(i));
+
+        Console.WriteLine("  " + string.Join(" | ", cols));
+        Console.WriteLine("  " + new string('-', Math.Min(100, string.Join(" | ", cols).Length)));
+
+            var printed = 0;
+            while (reader.Read() && printed++ < 200)
+            {
+                var cells = new List<string>(reader.FieldCount);
+                for (var i = 0; i < reader.FieldCount; i++)
+                    cells.Add(reader.IsDBNull(i) ? "NULL" : Convert.ToString(reader.GetValue(i), CultureInfo.InvariantCulture) ?? "");
+                Console.WriteLine("  " + string.Join(" | ", cells));
+            }
+            if (printed == 200) Console.WriteLine("  ... (truncated at 200 rows)");
+            if (printed == 0) Console.WriteLine("  (empty result set)");
+        }
+    }
+
+    private static string EscapeLike(string s) =>
+        s.Replace("\\", "\\\\").Replace("%", "\\%").Replace("_", "\\_");
+}

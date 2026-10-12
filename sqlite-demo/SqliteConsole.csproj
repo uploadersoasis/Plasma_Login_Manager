@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>SqliteConsole</RootNamespace>
+    <AssemblyName>sqlite-demo</AssemblyName>
+
+    <!-- `dotnet publish -t:Install` drops the binary into ~/.dotnet/tools -->
+    <PackAsTool>false</PackAsTool>
+
+    <!-- A tool for the terminal should not need a runtime install on target boxes -->
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Official Microsoft SQLite provider (bundles e_sqlite3 for linux-x64/arm64) -->
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.10" />
+    <!-- Stable GA line of the CLI parser; NamingConventionBinder gives CommandHandler -->
+    <PackageReference Include="System.CommandLine" Version="2.0.0-beta4.22272.1" />
+    <PackageReference Include="System.CommandLine.NamingConventionBinder" Version="2.0.0-beta4.22272.1" />
+  </ItemGroup>
+
+</Project>
