@@ -6,6 +6,7 @@ using System.Reflection;
 using System.CommandLine.Builder;
 using System.CommandLine.Parsing;
 using Microsoft.Data.Sqlite;
+using SqliteConsole;                  // CliExit lives here
 using SqliteConsole.Data;
 using SqliteConsole.Services;
 
@@ -71,7 +72,7 @@ info.Handler = CommandHandler.Create(() =>
     if (!db.Exists())
     {
         Console.Error.WriteLine($"✖ No usable database at {db.DbPath} — run: sqlite-demo init");
-        WantExitCode = 1;
+        ExitState.Want = 1;
         return;
     }
     using var conn = db.Open();
@@ -88,13 +89,15 @@ root.AddCommand(info);
 var sqlCmd = new Command("sql", "Run one SQL statement and print the result set.");
 var sqlArg = new Argument<string>("statement", () => "SELECT name, type FROM sqlite_master ORDER BY name;");
 sqlCmd.AddArgument(sqlArg);
-sqlCmd.Handler = CommandHandler.Create<string>(stmt =>
+// NOTE: the lambda parameter name MUST match the Argument's name
+// ("statement") — System.CommandLine's NamingConventionBinder binds by name.
+sqlCmd.Handler = CommandHandler.Create<string>(statement =>
 {
-    try { repo.RunRawSql(stmt); }
+    try { repo.RunRawSql(statement); }
     catch (SqliteException ex)
     {
         Console.Error.WriteLine($"✖ SQLite error {ex.SqliteErrorCode}: {ex.Message}");
-        WantExitCode = 1;
+        ExitState.Want = 1;
     }
 });
 root.AddCommand(sqlCmd);
@@ -116,7 +119,7 @@ var drop = new Command("drop", "Delete the database file (and -wal/-shm). Irreve
 drop.AddOption(yesOpt);
 drop.Handler = CommandHandler.Create<bool>(yes =>
 {
-    if (!yes) { Console.Error.WriteLine("✖ Refusing without --yes"); WantExitCode = 2; return; }
+    if (!yes) { Console.Error.WriteLine("✖ Refusing without --yes"); ExitState.Want = 2; return; }
     db.Delete();
     Console.WriteLine("✔ Deleted " + db.DbPath);
 });
@@ -132,13 +135,13 @@ add.AddArgument(titleArg);
 foreach (var o in new Option[] { notesOpt, prioOpt, dueOpt }) add.AddOption(o);
 add.Handler = CommandHandler.Create<string, string, int, string?>((title, notes, priority, dueRaw) =>
 {
-    if (priority is < 1 or > 3) { Console.Error.WriteLine("✖ --priority must be 1, 2 or 3"); WantExitCode = 2; return; }
+    if (priority is < 1 or > 3) { Console.Error.WriteLine("✖ --priority must be 1, 2 or 3"); ExitState.Want = 2; return; }
 
     DateOnly? due = null;
     if (!string.IsNullOrWhiteSpace(dueRaw))
     {
         if (!DateOnly.TryParseExact(dueRaw, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var d))
-        { Console.Error.WriteLine("✖ --due must be YYYY-MM-DD"); WantExitCode = 2; return; }
+        { Console.Error.WriteLine("✖ --due must be YYYY-MM-DD"); ExitState.Want = 2; return; }
         due = d;
     }
 
@@ -148,7 +151,7 @@ add.Handler = CommandHandler.Create<string, string, int, string?>((title, notes,
         Console.WriteLine($"✔ Added task #{id}: {title}");
     }
     catch (SqliteException ex) when (ex.SqliteErrorCode == 19)
-    { Console.Error.WriteLine("✖ Constraint violated: " + ex.Message); WantExitCode = 1; }
+    { Console.Error.WriteLine("✖ Constraint violated: " + ex.Message); ExitState.Want = 1; }
 });
 root.AddCommand(add);
 
@@ -160,9 +163,9 @@ foreach (var o in new Option[] { statusOpt, grepOpt, orderOpt }) list.AddOption(
 list.Handler = CommandHandler.Create<string?, string?, string>((status, grep, order) =>
 {
     if (status is not (null or Open or Doing or Done))
-    { Console.Error.WriteLine("✖ --status must be open|doing|done"); WantExitCode = 2; return; }
+    { Console.Error.WriteLine("✖ --status must be open|doing|done"); ExitState.Want = 2; return; }
     if (order is not ("id" or "due" or "priority"))
-    { Console.Error.WriteLine("✖ --order must be id|due|priority"); WantExitCode = 2; return; }
+    { Console.Error.WriteLine("✖ --order must be id|due|priority"); ExitState.Want = 2; return; }
 
     var rows = repo.Query(status, grep, order);
     if (rows.Count == 0) { Console.WriteLine("(no matching tasks)"); return; }
@@ -200,7 +203,7 @@ var nArg = new Argument<int>("count", () => 50, "How many rows");
 seed.AddArgument(nArg);
 seed.Handler = CommandHandler.Create<int>(n =>
 {
-    if (n <= 0) { Console.Error.WriteLine("✖ count must be > 0"); WantExitCode = 2; return; }
+    if (n <= 0) { Console.Error.WriteLine("✖ count must be > 0"); ExitState.Want = 2; return; }
     var written = repo.Seed(Math.Min(n, 100_000));
     Console.WriteLine($"✔ Seeded {written} rows in one transaction");
 });
@@ -234,7 +237,7 @@ var pipeline = new CommandLineBuilder(root)
     .Build();
 
 var rc = await pipeline.InvokeAsync(args);
-return rc != 0 ? rc : CliExit.Want;
+return rc != 0 ? rc : ExitState.Want;
 
 // -------------------------------------------------------------------- helpers
 static object Scalar(SqliteConnection conn, string sql)
@@ -252,7 +255,7 @@ static void Say(bool ok, long id, string what)
 {
     if (ok) { Console.WriteLine($"✔ Task #{id} {what}"); return; }
     Console.Error.WriteLine($"✖ No task with id {id}");
-    CliExit.Want = 1;                         // so scripts can test `$?` / use && and ||
+    ExitState.Want = 1;                         // so scripts can test `$?` / use && and ||
 }
 
 // (local) const strings Open/Doing/Done are declared above and reused by the helpers.

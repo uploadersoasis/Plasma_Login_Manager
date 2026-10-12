@@ -181,7 +181,7 @@ public sealed class TaskRepository(Db db)
         catch (SqliteException ex)
         {
             Console.Error.WriteLine($"✖ SQLite error {ex.SqliteErrorCode}: {ex.Message}");
-            SqliteConsole.CliExit.Want = 1;
+            SqliteConsole.ExitState.Want = 1;
             return;
         }
         using (reader)
